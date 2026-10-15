@@ -1,39 +1,82 @@
-name: Model Pre-Training Pipeline
+name: Pretrain TinyLM Model
 
 on:
-  workflow_dispatch: # Dapat dijalankan secara manual dari tab Actions
+  workflow_dispatch:
+    inputs:
+      context_window:
+        description: 'Context Window Size'
+        required: true
+        default: '5000'
+      batch_size:
+        description: 'Batch Size'
+        required: true
+        default: '100'
+      max_steps:
+        description: 'Max Training Steps'
+        required: true
+        default: '10000'
 
 jobs:
   pretrain:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
-          # cache: 'pip' dihapus untuk mencegah error pencarian requirements.txt
+          python-version: '3.11'
 
-      - name: Install Dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install numpy
+          pip install numpy torch tqdm
 
-      - name: Run Pre-Training Script
+      - name: Extract Dataset
         run: |
-          python train.py
+          if [ ! -f dataset.zip ]; then
+            echo "ERROR: dataset.zip not found in repository root."
+            exit 1
+          fi
+          unzip -q dataset.zip -d dataset_extracted
+          echo "Dataset extracted successfully."
+          ls -lh dataset_extracted
 
-      - name: Create Final Zip Archive
+      - name: Run Pretraining
+        env:
+          CONTEXT_WINDOW: ${{ github.event.inputs.context_window }}
+          BATCH_SIZE: ${{ github.event.inputs.batch_size }}
+          MAX_STEPS: ${{ github.event.inputs.max_steps }}
+          VOCAB_SIZE: 5000
+          EMBEDDING_DIM_H: 125
+          EMBEDDING_DIM_D: 156
+          MAX_OUTPUT_TOKENS: 2084
+          CHECKPOINT_INTERVAL: 10
         run: |
-          mkdir -p dist
-          # Membungkus file .bin dan manifest.json ke dalam zip
-          zip -j dist/model-output.zip output/*.bin output/manifest.json
+          python train.py \
+            --data_dir dataset_extracted \
+            --context_window $CONTEXT_WINDOW \
+            --batch_size $BATCH_SIZE \
+            --max_steps $MAX_STEPS \
+            --vocab_size $VOCAB_SIZE \
+            --dim_h $EMBEDDING_DIM_H \
+            --dim_d $EMBEDDING_DIM_D \
+            --max_output_tokens $MAX_OUTPUT_TOKENS \
+            --checkpoint_every $CHECKPOINT_INTERVAL
+
+      - name: Package Final Model
+        run: |
+          mkdir -p release
+          cp checkpoints/final/model.bin release/
+          cp checkpoints/final/manifest.json release/
+          cd release
+          zip -r ../kicau-model-release.zip .
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: trained-model-package
-          path: dist/model-output.zip
+          name: kicau-pretrained-model
+          path: kicau-model-release.zip
+          retention-days: 30
