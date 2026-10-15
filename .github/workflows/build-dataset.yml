@@ -110,7 +110,6 @@ jobs:
             exit 0
           fi
 
-          # Bangun notes tanpa backtick mentah (aman dari quoting bash)
           {
             echo "Dataset JSONL gzip — target 500 juta token (9 bahasa)."
             echo ""
@@ -145,6 +144,22 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # PERBAIKAN UTAMA: scripts/build_chunk.py tidak ada di repo →
+      # tulis fallback dari base64. Jika sudah di-commit, versi repo dipakai.
+      - name: Ensure build script exists
+        run: |
+          set -euo pipefail
+          mkdir -p scripts
+          if [ -f scripts/build_chunk.py ]; then
+            echo "✔ scripts/build_chunk.py ditemukan di repo (pakai versi repo)"
+          else
+            echo "⚠ scripts/build_chunk.py TIDAK ditemukan di repo → menulis fallback..."
+            printf '%s' 'IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwoiIiIKQnVpbGQgMSBjaHVuayBkYXRhc2V0IEpTT05MIChnemlwIHN0cmVhbWluZywgaGVtYXQgZGlzaykuCgpGb3JtYXQgcGVyIGJhcmlzOgogICAgeyJ0ZXh0IjogeyJsYW5nIjogIi4uLiIsICJjYXRlZ29yeSI6ICIuLi4iLCAiY29udGVudCI6ICIuLi4ifX0KCkNvbnRvaDoKICAgIHB5dGhvbiBzY3JpcHRzL2J1aWxkX2NodW5rLnB5IFwKICAgICAgICAtLWNodW5rLWlkIDAgLS1jaHVuay10b2tlbnMgMjUwMDAwMDAgLS1vdXRwdXQgcGFydF8wMDAuanNvbmwuZ3oKCkV4aXQgY29kZXM6CiAgICAwID0gY2h1bmsgbGVuZ2thcCAodGFyZ2V0IHRva2VuIHRlcmNhcGFpKQogICAgMSA9IG91dHB1dCB0aWRhayB0ZXJiZW50dWsgLyBrb3NvbmcKICAgIDIgPSBhcmd1bWVuIHRpZGFrIHZhbGlkCiAgICAzID0gY2h1bmsgVElEQUsgbGVuZ2thcCAoQVBJIGdhZ2FsIC8gc2lueWFsIHRlcm1pbmF0ZSkgLT4gam9iIGdhZ2FsLAogICAgICAgIGZpbGUgcGFyc2lhbCB0ZXRhcCB0ZXJzaW1wYW4gdW50dWsgZGVidWcgdGFwaSBUSURBSyBkaS11cGxvYWQKICAgICAgICBzZWJhZ2FpIGNodW5rICJzZWxlc2FpIi4KIiIiCmZyb20gX19mdXR1cmVfXyBpbXBvcnQgYW5ub3RhdGlvbnMKCmltcG9ydCBhcmdwYXJzZQppbXBvcnQgZ3ppcAppbXBvcnQgaGFzaGxpYgppbXBvcnQganNvbgppbXBvcnQgcmFuZG9tCmltcG9ydCBzaWduYWwKaW1wb3J0IHN5cwppbXBvcnQgdGltZQpmcm9tIHBhdGhsaWIgaW1wb3J0IFBhdGgKCmltcG9ydCByZXF1ZXN0cwoKVVNFUl9BR0VOVCA9ICgKICAgICJBeGlvbkFJLURhdGFzZXRCdWlsZGVyLzEuMCAiCiAgICAiKGVkdWNhdGlvbmFsOyAraHR0cHM6Ly9naXRodWIuY29tL2F6cmllbHNwYWNlODUyLXdxL2F4aW9uLWFpKSIKKQojIH40IGNoYXIvdG9rZW4gdW50dWsgdGVrcyBMYXRpbjsgQ0pLIChIYW4vSGlyYWdhbmEvS2F0YWthbmEvSGFuZ3VsKSB+MQojIGNoYXIvdG9rZW4uIEVzdGltYXNpIGthc2FyIGFnYXIgY2h1bmsgdGlkYWsgb3ZlcnNob290IGJlc2FyIHVudHVrIGphL3poLgpMQVRJTl9DSEFSU19QRVJfVE9LRU4gPSA0Ck1JTl9BUlRJQ0xFX0NIQVJTID0gODAwCgpMQU5HX1dFSUdIVFMgPSB7CiAgICAiZW4iOiAwLjQwLAogICAgImRlIjogMC4xMCwKICAgICJmciI6IDAuMTAsCiAgICAiZXMiOiAwLjEwLAogICAgInJ1IjogMC4wOCwKICAgICJpdCI6IDAuMDcsCiAgICAiamEiOiAwLjA2LAogICAgInpoIjogMC4wNSwKICAgICJwdCI6IDAuMDQsCn0KCkNBVEVHT1JZX1BSRUZJWEVTID0gKAogICAgIkNhdGVnb3J5OiIsICJLYXRlZ29yaToiLCAiQ2F0w6lnb3JpZToiLCAiS2F0ZWdvcmllOiIsCiAgICAiQ2F0ZWdvcsOtYToiLCAi0JrQsNGC0LXQs9C+0YDQuNGPOiIsICJDYXRlZ29yaWE6IiwgIuOCq+ODhuOCtOODqjoiLCAi5YiG57G7OiIsCikKCk1BWF9SRVRSSUVTICAgID0gNApSRVRSWV9CQUNLT0ZGICA9IDEuNiAgICAgIyBkZXRpayDihpIgMS42LCAyLjU2LCA0LjEsIDYuNTUKRkVUQ0hfQkFUQ0hfU1ogPSAyMCAgICAgICMgZXhsaW1pdD1tYXggaGFueWEgbWVsYXlhbmkgfjIwIGV4dHJhY3QgcGVyIHF1ZXJ5Ck1BWF9FTVBUWV9TVFJFQUsgPSA1MCAgICAjIGJhdGNoIGJlcnR1cnV0LXR1cnV0IHRhbnBhIGFydGlrZWwgbG9sb3MgZmlsdGVyCgoKIyAtLS0tLS0tLS0tLS0tLS0tLS0tLS0tIHV0aWxzIC0tLS0tLS0tLS0tLS0tLS0tLS0tLS0KCmRlZiBfaXNfY2prKGNoOiBzdHIpIC0+IGJvb2w6CiAgICBjcCA9IG9yZChjaCkKICAgIHJldHVybiAoCiAgICAgICAgMHg0RTAwIDw9IGNwIDw9IDB4OUZGRiAgICMgQ0pLIFVuaWZpZWQgSWRlb2dyYXBocyAoSGFuKQogICAgICAgIG9yIDB4MzA0MCA8PSBjcCA8PSAweDMwRkYgICMgSGlyYWdhbmEgKyBLYXRha2FuYQogICAgICAgIG9yIDB4QUMwMCA8PSBjcCA8PSAweEQ3QUYgICMgSGFuZ3VsIFN5bGxhYmxlcwogICAgICAgIG9yIDB4MzQwMCA8PSBjcCA8PSAweDREQkYgICMgQ0pLIEV4dGVuc2lvbiBBCiAgICApCgoKZGVmIGVzdGltYXRlX3Rva2Vucyh0ZXh0OiBzdHIpIC0+IGludDoKICAgIGNqayA9IHN1bSgxIGZvciBjaCBpbiB0ZXh0IGlmIF9pc19jamsoY2gpKQogICAgb3RoZXIgPSBsZW4odGV4dCkgLSBjamsKICAgIHJldHVybiBtYXgoMSwgY2prICsgb3RoZXIgLy8gTEFUSU5fQ0hBUlNfUEVSX1RPS0VOKQoKCmRlZiBwaWNrX2xhbmdzKG46IGludCkgLT4gbGlzdFtzdHJdOgogICAgIiIiUGlsaWggbiBiYWhhc2EgdW5payBkZW5nYW4gYm9ib3Qgc2VzdWFpIExBTkdfV0VJR0hUUy4iIiIKICAgIGlmIG4gPD0gMDoKICAgICAgICByZXR1cm4gW10KICAgIGtleXMsIHdlaWdodHMgPSBsaXN0KExBTkdfV0VJR0hUUy5rZXlzKCkpLCBsaXN0KExBTkdfV0VJR0hUUy52YWx1ZXMoKSkKICAgIGNob3NlbjogbGlzdFtzdHJdID0gW10KICAgIGZvciBfIGluIHJhbmdlKG4gKiA4KToKICAgICAgICBpZiBsZW4oY2hvc2VuKSA+PSBuOgogICAgICAgICAgICBicmVhawogICAgICAgIGMgPSByYW5kb20uY2hvaWNlcyhrZXlzLCB3ZWlnaHRzPXdlaWdodHMsIGs9MSlbMF0KICAgICAgICBpZiBjIG5vdCBpbiBjaG9zZW46CiAgICAgICAgICAgIGNob3Nlbi5hcHBlbmQoYykKICAgIGZvciBrIGluIGtleXM6ICAgICAgICAgICAgICAgICAgICAgICAjIGZhbGxiYWNrIGRldGVybWluaXN0aWsKICAgICAgICBpZiBsZW4oY2hvc2VuKSA+PSBuOgogICAgICAgICAgICBicmVhawogICAgICAgIGlmIGsgbm90IGluIGNob3NlbjoKICAgICAgICAgICAgY2hvc2VuLmFwcGVuZChrKQogICAgcmV0dXJuIGNob3Nlbls6bl0KCgpkZWYgZmluZ2VycHJpbnQodGV4dDogc3RyKSAtPiBzdHI6CiAgICByZXR1cm4gaGFzaGxpYi5tZDUodGV4dFs6NTAwXS5lbmNvZGUoInV0Zi04IiwgImlnbm9yZSIpKS5oZXhkaWdlc3QoKQoKCmRlZiBfc2Vzc2lvbigpIC0+IHJlcXVlc3RzLlNlc3Npb246CiAgICBzID0gcmVxdWVzdHMuU2Vzc2lvbigpCiAgICBzLmhlYWRlcnMudXBkYXRlKHsiVXNlci1BZ2VudCI6IFVTRVJfQUdFTlQsICJBY2NlcHQiOiAiYXBwbGljYXRpb24vanNvbiJ9KQogICAgcmV0dXJuIHMKCgojIC0tLS0tLS0tLS0tLS0tLS0tLS0tLS0gZmV0Y2ggLS0tLS0tLS0tLS0tLS0tLS0tLS0tLQoKZGVmIGZldGNoX2JhdGNoKHNlc3Npb246IHJlcXVlc3RzLlNlc3Npb24sIGxhbmc6IHN0ciwgY291bnQ6IGludCkgLT4gbGlzdFtkaWN0XToKICAgICIiIkFtYmlsIGJhdGNoIGFydGlrZWwgYWNhayBXaWtpcGVkaWEgPGxhbmc+IGRlbmdhbiByZXRyeStiYWNrb2ZmLiIiIgogICAgdXJsID0gZiJodHRwczovL3tsYW5nfS53aWtpcGVkaWEub3JnL3cvYXBpLnBocCIKICAgIHBhcmFtcyA9IHsKICAgICAgICAiYWN0aW9uIjogInF1ZXJ5IiwKICAgICAgICAiZm9ybWF0IjogImpzb24iLAogICAgICAgICJmb3JtYXR2ZXJzaW9uIjogMiwKICAgICAgICAiZ2VuZXJhdG9yIjogInJhbmRvbSIsCiAgICAgICAgImdybm5hbWVzcGFjZSI6IDAsCiAgICAgICAgImdybmxpbWl0IjogY291bnQsCiAgICAgICAgInByb3AiOiAiZXh0cmFjdHN8Y2F0ZWdvcmllc3xpbmZvIiwKICAgICAgICAiaW5wcm9wIjogInVybCIsCiAgICAgICAgImV4cGxhaW50ZXh0IjogVHJ1ZSwKICAgICAgICAiZXhsaW1pdCI6ICJtYXgiLAogICAgICAgICJjbGxpbWl0IjogIm1heCIsCiAgICAgICAgImNsc2hvdyI6ICIhaGlkZGVuIiwKICAgIH0KCiAgICBkYXRhID0gTm9uZQogICAgbGFzdF9lcnI6IEV4Y2VwdGlvbiB8IE5vbmUgPSBOb25lCiAgICBmb3IgYXR0ZW1wdCBpbiByYW5nZSgxLCBNQVhfUkVUUklFUyArIDEpOgogICAgICAgIHRyeToKICAgICAgICAgICAgciA9IHNlc3Npb24uZ2V0KHVybCwgcGFyYW1zPXBhcmFtcywgdGltZW91dD02MCkKICAgICAgICAgICAgaWYgci5zdGF0dXNfY29kZSBpbiAoNDI5LCA1MDMpOgogICAgICAgICAgICAgICAgcmFpc2UgcmVxdWVzdHMuSFRUUEVycm9yKGYiSFRUUCB7ci5zdGF0dXNfY29kZX0iKQogICAgICAgICAgICByLnJhaXNlX2Zvcl9zdGF0dXMoKQogICAgICAgICAgICBkYXRhID0gci5qc29uKCkKICAgICAgICAgICAgYnJlYWsKICAgICAgICBleGNlcHQgRXhjZXB0aW9uIGFzIGU6CiAgICAgICAgICAgIGxhc3RfZXJyID0gZQogICAgICAgICAgICB3YWl0ID0gUkVUUllfQkFDS09GRiAqKiBhdHRlbXB0CiAgICAgICAgICAgIHByaW50KGYiWyFdIGZldGNoIHtsYW5nfSBnYWdhbCAoe2F0dGVtcHR9L3tNQVhfUkVUUklFU30pOiB7ZX0gIgogICAgICAgICAgICAgICAgICBmIuKGkiB0dW5nZ3Uge3dhaXQ6LjFmfXMiLCBmbHVzaD1UcnVlKQogICAgICAgICAgICB0aW1lLnNsZWVwKHdhaXQpCgogICAgaWYgZGF0YSBpcyBOb25lOgogICAgICAgIHByaW50KGYiWyFdIG1lbnllcmFoIGZldGNoIHtsYW5nfToge2xhc3RfZXJyfSIsIGZsdXNoPVRydWUpCiAgICAgICAgcmV0dXJuIFtdCgogICAgb3V0OiBsaXN0W2RpY3RdID0gW10KICAgIGZvciBwYWdlIGluIGRhdGEuZ2V0KCJxdWVyeSIsIHt9KS5nZXQoInBhZ2VzIiwgW10pIG9yIFtdOgogICAgICAgIGV4dHJhY3QgPSAocGFnZS5nZXQoImV4dHJhY3QiKSBvciAiIikuc3RyaXAoKQogICAgICAgIGlmIGxlbihleHRyYWN0KSA8IE1JTl9BUlRJQ0xFX0NIQVJTOgogICAgICAgICAgICBjb250aW51ZQoKICAgICAgICBjYXRlZ29yeSA9ICJnZW5lcmFsIgogICAgICAgIGZvciBjIGluIHBhZ2UuZ2V0KCJjYXRlZ29yaWVzIiwgW10pIG9yIFtdOgogICAgICAgICAgICB0aXRsZSA9IGMuZ2V0KCJ0aXRsZSIsICIiKQogICAgICAgICAgICBmb3IgcHJlZml4IGluIENBVEVHT1JZX1BSRUZJWEVTOgogICAgICAgICAgICAgICAgaWYgdGl0bGUuc3RhcnRzd2l0aChwcmVmaXgpOgogICAgICAgICAgICAgICAgICAgIGNhdGVnb3J5ID0gdGl0bGVbbGVuKHByZWZpeCk6XSBvciAiZ2VuZXJhbCIKICAgICAgICAgICAgICAgICAgICBicmVhawogICAgICAgICAgICBpZiBjYXRlZ29yeSAhPSAiZ2VuZXJhbCI6CiAgICAgICAgICAgICAgICBicmVhawoKICAgICAgICBvdXQuYXBwZW5kKHsKICAgICAgICAgICAgInBhZ2VfaWQiOiBwYWdlLmdldCgicGFnZWlkIiksCiAgICAgICAgICAgICJ0ZXh0IjogewogICAgICAgICAgICAgICAgImxhbmciOiAgICAgbGFuZywKICAgICAgICAgICAgICAgICJjYXRlZ29yeSI6IGNhdGVnb3J5LAogICAgICAgICAgICAgICAgImNvbnRlbnQiOiAgZXh0cmFjdCwKICAgICAgICAgICAgfSwKICAgICAgICB9KQogICAgcmV0dXJuIG91dAoKCiMgLS0tLS0tLS0tLS0tLS0tLS0tLS0tLSBtYWluIC0tLS0tLS0tLS0tLS0tLS0tLS0tLS0KCmRlZiBwYXJzZV9hcmdzKCkgLT4gYXJncGFyc2UuTmFtZXNwYWNlOgogICAgYXAgPSBhcmdwYXJzZS5Bcmd1bWVudFBhcnNlcigpCiAgICBhcC5hZGRfYXJndW1lbnQoIi0tY2h1bmstaWQiLCAgICAgdHlwZT1pbnQsIHJlcXVpcmVkPVRydWUpCiAgICBhcC5hZGRfYXJndW1lbnQoIi0tY2h1bmstdG9rZW5zIiwgdHlwZT1pbnQsIGRlZmF1bHQ9MjVfMDAwXzAwMCkKICAgIGFwLmFkZF9hcmd1bWVudCgiLS1vdXRwdXQiLCAgICAgICByZXF1aXJlZD1UcnVlKQogICAgYXAuYWRkX2FyZ3VtZW50KCItLW1heC1sYW5ncyIsICAgIHR5cGU9aW50LCBkZWZhdWx0PTQsCiAgICAgICAgICAgICAgICAgICAgaGVscD0ianVtbGFoIGJhaGFzYSBiZXJiZWRhIHlhbmcgZGljb2JhIHBlciBpdGVyYXNpIikKICAgIHJldHVybiBhcC5wYXJzZV9hcmdzKCkKCgpkZWYgbWFpbigpIC0+IGludDoKICAgIGFyZ3MgPSBwYXJzZV9hcmdzKCkKICAgIGlmIGFyZ3MuY2h1bmtfdG9rZW5zIDw9IDA6CiAgICAgICAgcHJpbnQoIlvinJddIC0tY2h1bmstdG9rZW5zIGhhcnVzID4gMCIsIGZsdXNoPVRydWUpCiAgICAgICAgcmV0dXJuIDIKCiAgICByYW5kb20uc2VlZCgxMDAwICsgYXJncy5jaHVua19pZCkKICAgIG91dF9wYXRoID0gUGF0aChhcmdzLm91dHB1dCkKICAgIG91dF9wYXRoLnBhcmVudC5ta2RpcihwYXJlbnRzPVRydWUsIGV4aXN0X29rPVRydWUpCgogICAgdGFyZ2V0ID0gYXJncy5jaHVua190b2tlbnMKICAgIHRvdGFsICA9IDAKICAgIHNlZW5faWRzOiBzZXRbdHVwbGVbc3RyLCBpbnQgfCBOb25lXV0gPSBzZXQoKQogICAgc2Vlbl9mcDogIGRpY3Rbc3RyLCBzZXRbc3RyXV0gPSB7fQoKICAgIHNlc3Npb24gPSBfc2Vzc2lvbigpCgogICAgcHJpbnQoZiJbY2h1bmsge2FyZ3MuY2h1bmtfaWR9XSB0YXJnZXQ9e3RhcmdldDosfSB0b2tlbiDihpIge291dF9wYXRofSIsCiAgICAgICAgICBmbHVzaD1UcnVlKQoKICAgICMgLS0tLSBncmFjZWZ1bCBzaHV0ZG93biAoYWdhciBmaWxlIGd6aXAgdGV0YXAgdmFsaWQpIC0tLS0KICAgIHN0b3AgPSB7ImZsYWciOiBGYWxzZX0KICAgIGRlZiBfb25fc2lnbmFsKHNpZ251bSwgX2ZyYW1lKToKICAgICAgICBzdG9wWyJmbGFnIl0gPSBUcnVlCiAgICAgICAgcHJpbnQoZiJbIV0gc2lnbmFsIHtzaWdudW19IGRpdGVyaW1hIOKGkiBtZW51dHVwIGZpbGUgZGVuZ2FuIHJhcGkuLi4iLAogICAgICAgICAgICAgIGZsdXNoPVRydWUpCiAgICBzaWduYWwuc2lnbmFsKHNpZ25hbC5TSUdURVJNLCBfb25fc2lnbmFsKQogICAgc2lnbmFsLnNpZ25hbChzaWduYWwuU0lHSU5ULCAgX29uX3NpZ25hbCkKCiAgICBjb21wbGV0ZWQgPSBGYWxzZQogICAgZW1wdHlfc3RyZWFrID0gMAogICAgdHJ5OgogICAgICAgIHdpdGggZ3ppcC5vcGVuKG91dF9wYXRoLCAid3QiLCBlbmNvZGluZz0idXRmLTgiLAogICAgICAgICAgICAgICAgICAgICAgIGNvbXByZXNzbGV2ZWw9NikgYXMgZjoKICAgICAgICAgICAgd2hpbGUgdG90YWwgPCB0YXJnZXQgYW5kIG5vdCBzdG9wWyJmbGFnIl06CiAgICAgICAgICAgICAgICBmb3IgbGFuZyBpbiBwaWNrX2xhbmdzKGFyZ3MubWF4X2xhbmdzKToKICAgICAgICAgICAgICAgICAgICBpZiB0b3RhbCA+PSB0YXJnZXQgb3Igc3RvcFsiZmxhZyJdOgogICAgICAgICAgICAgICAgICAgICAgICBicmVhawoKICAgICAgICAgICAgICAgICAgICBiYXRjaCA9IGZldGNoX2JhdGNoKHNlc3Npb24sIGxhbmcsIEZFVENIX0JBVENIX1NaKQogICAgICAgICAgICAgICAgICAgIGlmIG5vdCBiYXRjaDoKICAgICAgICAgICAgICAgICAgICAgICAgZW1wdHlfc3RyZWFrICs9IDEKICAgICAgICAgICAgICAgICAgICAgICAgaWYgZW1wdHlfc3RyZWFrID49IE1BWF9FTVBUWV9TVFJFQUs6CiAgICAgICAgICAgICAgICAgICAgICAgICAgICByYWlzZSBSdW50aW1lRXJyb3IoCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgZiJ7TUFYX0VNUFRZX1NUUkVBS30gYmF0Y2ggYmVydHVydXQtdHVydXQgIgogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICJ0YW5wYSBhcnRpa2VsIOKAlCBBUEkgYmVybWFzYWxhaCwgaGVudGlrYW4uIgogICAgICAgICAgICAgICAgICAgICAgICAgICAgKQogICAgICAgICAgICAgICAgICAgICAgICBjb250aW51ZQogICAgICAgICAgICAgICAgICAgIGVtcHR5X3N0cmVhayA9IDAKCiAgICAgICAgICAgICAgICAgICAgZm9yIHJlYyBpbiBiYXRjaDoKICAgICAgICAgICAgICAgICAgICAgICAga2V5ID0gKHJlY1sidGV4dCJdWyJsYW5nIl0sIHJlY1sicGFnZV9pZCJdKQogICAgICAgICAgICAgICAgICAgICAgICBpZiBrZXkgaW4gc2Vlbl9pZHM6CiAgICAgICAgICAgICAgICAgICAgICAgICAgICBjb250aW51ZQogICAgICAgICAgICAgICAgICAgICAgICBzZWVuX2lkcy5hZGQoa2V5KQoKICAgICAgICAgICAgICAgICAgICAgICAgZnBfc2V0ID0gc2Vlbl9mcC5zZXRkZWZhdWx0KHJlY1sidGV4dCJdWyJsYW5nIl0sIHNldCgpKQogICAgICAgICAgICAgICAgICAgICAgICBmcCA9IGZpbmdlcnByaW50KHJlY1sidGV4dCJdWyJjb250ZW50Il0pCiAgICAgICAgICAgICAgICAgICAgICAgIGlmIGZwIGluIGZwX3NldDoKICAgICAgICAgICAgICAgICAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgICAgICAgICAgICAgICAgIGZwX3NldC5hZGQoZnApCgogICAgICAgICAgICAgICAgICAgICAgICBmLndyaXRlKGpzb24uZHVtcHMoeyJ0ZXh0IjogcmVjWyJ0ZXh0Il19LAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgZW5zdXJlX2FzY2lpPUZhbHNlKSArICJcbiIpCiAgICAgICAgICAgICAgICAgICAgICAgIHRvdGFsICs9IGVzdGltYXRlX3Rva2VucyhyZWNbInRleHQiXVsiY29udGVudCJdKQogICAgICAgICAgICAgICAgICAgICAgICBpZiB0b3RhbCA+PSB0YXJnZXQ6CiAgICAgICAgICAgICAgICAgICAgICAgICAgICBicmVhawoKICAgICAgICAgICAgICAgICAgICBwY3QgPSAoMTAwLjAgKiB0b3RhbCAvIHRhcmdldCkgaWYgdGFyZ2V0IGVsc2UgMC4wCiAgICAgICAgICAgICAgICAgICAgcHJpbnQoZiJbY2h1bmsge2FyZ3MuY2h1bmtfaWR9XSB7dG90YWw6LH0gdG9rZW4gIgogICAgICAgICAgICAgICAgICAgICAgICAgIGYiKHtwY3Q6NS4xZn0lKSIsIGZsdXNoPVRydWUpCiAgICAgICAgICAgICAgICAgICAgdGltZS5zbGVlcCgwLjE1KQoKICAgICAgICAgICAgIyBMb29wIGJlcmFraGlyOiBsZW5na2FwIGhhbnlhIGppa2EgdGFyZ2V0IHRlcmNhcGFpIChidWthbgogICAgICAgICAgICAjIGthcmVuYSBzaW55YWwvU0lHVEVSTSkuCiAgICAgICAgICAgIGNvbXBsZXRlZCA9IHRvdGFsID49IHRhcmdldAoKICAgIGV4Y2VwdCBSdW50aW1lRXJyb3IgYXMgZToKICAgICAgICAjIEZpbGUgZ3ppcCB0ZXRhcCBkaXR1dHVwIHJhcGkgb2xlaCBjb250ZXh0IG1hbmFnZXIsIHRhcGkgY2h1bmsKICAgICAgICAjIGluaSBUSURBSyBsZW5na2FwIOKGkiBleGl0IG5vbi16ZXJvIGFnYXIgam9iIGdhZ2FsICYgdGlkYWsgZGktdXBsb2FkCiAgICAgICAgIyBzZWJhZ2FpIGNodW5rICJzZWxlc2FpIi4KICAgICAgICBwcmludChmIlshXSB7ZX0iLCBmbHVzaD1UcnVlKQogICAgICAgIGNvbXBsZXRlZCA9IEZhbHNlCiAgICBleGNlcHQgRXhjZXB0aW9uIGFzIGU6CiAgICAgICAgcHJpbnQoZiJbIV0gZXJyb3IgdGFrIHRlcmR1Z2E6IHtlfSIsIGZsdXNoPVRydWUpCiAgICAgICAgcmFpc2UKCiAgICBpZiBub3Qgb3V0X3BhdGguZXhpc3RzKCkgb3Igb3V0X3BhdGguc3RhdCgpLnN0X3NpemUgPT0gMDoKICAgICAgICBwcmludChmIlvinJddIHtvdXRfcGF0aH0gdGlkYWsgdGVyYmVudHVrIC8ga29zb25nIiwgZmx1c2g9VHJ1ZSkKICAgICAgICByZXR1cm4gMQoKICAgIHNpemVfbWIgPSBvdXRfcGF0aC5zdGF0KCkuc3Rfc2l6ZSAvIDFlNgogICAgaWYgbm90IGNvbXBsZXRlZDoKICAgICAgICBwcmludChmIlshXSB7b3V0X3BhdGh9OiBJTkNPTVBMRVRFIHt0b3RhbDosfS97dGFyZ2V0Oix9IHRva2VuICIKICAgICAgICAgICAgICBmIih7c2l6ZV9tYjouMWZ9IE1CIGd6aXApIOKAlCBqb2IgZGl0YW5kYWkgZ2FnYWwiLCBmbHVzaD1UcnVlKQogICAgICAgIHJldHVybiAzCgogICAgcHJpbnQoZiJb4pyTXSB7b3V0X3BhdGh9OiB7dG90YWw6LH0gdG9rZW4sIHtzaXplX21iOi4xZn0gTUIgZ3ppcCIsIGZsdXNoPVRydWUpCiAgICByZXR1cm4gMAoKCmlmIF9fbmFtZV9fID09ICJfX21haW5fXyI6CiAgICBzeXMuZXhpdChtYWluKCkpCg==' | base64 -d > scripts/build_chunk.py
+            echo "✔ fallback script ditulis ($(wc -l < scripts/build_chunk.py) baris)"
+          fi
+          python3 -m py_compile scripts/build_chunk.py
+          echo "✔ sintaks scripts/build_chunk.py valid"
 
       - uses: actions/setup-python@v5
         with:
@@ -182,6 +197,8 @@ jobs:
     needs: [prepare, build]
     if: always() && needs.prepare.result == 'success' && needs.build.result != 'cancelled'
     runs-on: ubuntu-latest
+    outputs:
+      have: ${{ steps.check.outputs.have }}
     steps:
       - name: Download all artifacts
         continue-on-error: true
@@ -198,12 +215,14 @@ jobs:
           shopt -s nullglob
           files=(artifacts/dataset_part_*.jsonl.gz)
           if [ ${#files[@]} -eq 0 ]; then
-            echo "::warning::Tidak ada file dataset untuk diupload."
+            # PERBAIKAN: dulu hanya warning → publish "sukses" padahal 0 file.
+            # Sekarang gagal agar status workflow jujur mencerminkan kegagalan.
+            echo "::error::Tidak ada file dataset untuk diupload (0 artifact). Build chunk kemungkinan besar gagal semua."
             echo "have=0" >> "$GITHUB_OUTPUT"
-          else
-            ls -lh "${files[@]}"
-            echo "have=${#files[@]}" >> "$GITHUB_OUTPUT"
+            exit 1
           fi
+          ls -lh "${files[@]}"
+          echo "have=${#files[@]}" >> "$GITHUB_OUTPUT"
 
       - name: Upload chunks to release
         if: steps.check.outputs.have != '0'
@@ -230,20 +249,22 @@ jobs:
     steps:
       - name: Ringkasan
         env:
-          TC:  ${{ needs.prepare.outputs.total_chunks }}
-          CT:  ${{ needs.prepare.outputs.chunk_tokens }}
+          TC:   ${{ needs.prepare.outputs.total_chunks }}
+          CT:   ${{ needs.prepare.outputs.chunk_tokens }}
           REPO: ${{ needs.prepare.outputs.target_repo }}
           TAG:  ${{ needs.prepare.outputs.release_tag }}
           BR:   ${{ needs.build.result }}
           PR:   ${{ needs.publish.result }}
+          HAVE: ${{ needs.publish.outputs.have }}
         run: |
           {
-            echo "### 📦 Dataset build selesai"
+            echo "### Dataset build selesai"
             echo ""
             echo "- Chunk: **${TC}** × **${CT}** token"
             echo "- Total target: **500.000.000 token**"
             echo "- Repo target: \`${REPO}\`"
             echo "- Release: [\`${TAG}\`](https://github.com/${REPO}/releases/tag/${TAG})"
+            echo "- File ter-upload: **${HAVE:-0}** / ${TC}"
             echo "- Build status:   **${BR}**"
             echo "- Publish status: **${PR}**"
           } >> "$GITHUB_STEP_SUMMARY"
