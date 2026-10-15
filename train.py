@@ -2,7 +2,12 @@
 """
 TinyLM-ContextMLP Pretraining Script (Updated)
 - Builds vocabulary from actual dataset content
-- Handles nested JSONL structure: {"text": {"content": ...}}
+- Handles 4 JSONL structures:
+    1) {"prompt": "", "response": ""}
+    2) {"id": "", "kategori": "", "tingkat_kesulitan": number,
+        "messages": [{"role": "", "content": ""}]}
+    3) {"text": ""}
+    4) {"text": {"lang": "", "category": "", "content": ""}}   <-- struktur lama
 - Produces web-compatible .bin + manifest.json
 - Checkpointing every N batches
 """
@@ -28,12 +33,9 @@ from tqdm import tqdm
 
 
 # ============================================================================
-# CONFIGURATION & CONSTANTS (UPDATED)
+# CONFIGURATION & CONSTANTS
 # ============================================================================
 
-# Python re-compatible pattern (equivalent to \p{L}[\p{L}\p{M}]*|\p{N}+|[^\s])
-# \w matches [a-zA-Z0-9_] + Unicode letters/digits in Python 3 with re.UNICODE
-# This is the closest stdlib equivalent without requiring 'regex' package
 TOKENIZER_PATTERN = r"\w+|[^\s\w]"
 SPECIAL_TOKENS = ["<pad>", "<unk>", "<bos>", "<eos>"]
 MODEL_NAME     = "tinylm-contextmlp"
@@ -41,24 +43,97 @@ ARCHITECTURE   = "TinyLMContextMLP"
 FORMAT_VERSION = "1.0.0"
 SCHEMA_VERSION = 3
 
+
 # ============================================================================
-# VOCABULARY BUILDER (FIXED)
+# JSONL STRUCTURE HANDLER (NEW)
+# ============================================================================
+
+# Pemisah antar-field agar model belajar batas antar bagian
+FIELD_SEP = "\n"
+MSG_SEP   = "\n"
+ROLE_SEP  = ": "
+
+
+def extract_content(obj: Any) -> str:
+    """
+    Ekstrak teks dari 4 struktur JSONL yang didukung.
+    Mengembalikan string kosong jika tidak ada struktur yang cocok.
+
+    Struktur:
+      1) {"prompt": "", "response": ""}
+      2) {"id": "", "kategori": "", "tingkat_kesulitan": number,
+          "messages": [{"role": "", "content": ""}]}
+      3) {"text": ""}
+      4) {"text": {"lang": "", "category": "", "content": ""}}  (struktur lama)
+    """
+    if not isinstance(obj, dict):
+        return ""
+
+    # --- Struktur 1: prompt / response ---
+    if "prompt" in obj or "response" in obj:
+        parts: List[str] = []
+        prompt = obj.get("prompt")
+        response = obj.get("response")
+        if isinstance(prompt, str) and prompt.strip():
+            parts.append(prompt.strip())
+        if isinstance(response, str) and response.strip():
+            parts.append(response.strip())
+        if parts:
+            return FIELD_SEP.join(parts)
+
+    # --- Struktur 2: messages[{role, content}] ---
+    if "messages" in obj and isinstance(obj["messages"], list):
+        parts: List[str] = []
+        for msg in obj["messages"]:
+            if not isinstance(msg, dict):
+                continue
+            content = msg.get("content", "")
+            role = msg.get("role", "")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            if isinstance(role, str) and role.strip():
+                parts.append(f"{role.strip()}{ROLE_SEP}{content.strip()}")
+            else:
+                parts.append(content.strip())
+        if parts:
+            return MSG_SEP.join(parts)
+
+    # --- Struktur 4 & 3: field "text" (dict atau string) ---
+    text = obj.get("text")
+    if isinstance(text, dict):
+        # Struktur 4 (lama): {"text": {"lang":..., "category":..., "content": "..."}}
+        content = text.get("content", "")
+        if isinstance(content, str):
+            return content.strip()
+        return ""
+    if isinstance(text, str):
+        # Struktur 3: {"text": "..."}
+        return text.strip()
+
+    return ""
+
+
+def iter_jsonl_files(data_dir: str) -> List[str]:
+    """Cari semua file .jsonl (rekursif)."""
+    files = sorted(glob.glob(os.path.join(data_dir, "**/*.jsonl"), recursive=True))
+    if not files:
+        raise FileNotFoundError(f"No .jsonl files found in {data_dir}")
+    return files
+
+
+# ============================================================================
+# VOCABULARY BUILDER
 # ============================================================================
 
 def build_vocab_from_data(data_dir: str, vocab_size: int) -> Tuple[Dict[str, int], List[str]]:
     """
-    Build vocabulary from actual dataset content.
-    Uses Python stdlib re (no \p{} support needed).
+    Build vocabulary from actual dataset content (semua 4 struktur JSONL).
     Returns (token_to_id dict, id_to_token list).
     """
     counter = Counter()
-    jsonl_files = sorted(glob.glob(os.path.join(data_dir, "**/*.jsonl"), recursive=True))
-
-    if not jsonl_files:
-        raise FileNotFoundError(f"No .jsonl files found in {data_dir}")
+    jsonl_files = iter_jsonl_files(data_dir)
 
     print(f"📚 Building vocab from {len(jsonl_files)} files...")
-    # Use stdlib-compatible pattern with re.UNICODE flag
     pattern = re.compile(TOKENIZER_PATTERN, re.UNICODE)
 
     for fpath in tqdm(jsonl_files, desc="Scanning tokens"):
@@ -69,17 +144,13 @@ def build_vocab_from_data(data_dir: str, vocab_size: int) -> Tuple[Dict[str, int
                     continue
                 try:
                     obj = json.loads(line)
-                    content = ""
-                    if isinstance(obj.get("text"), dict):
-                        content = obj["text"].get("content", "")
-                    elif isinstance(obj.get("text"), str):
-                        content = obj["text"]
-
-                    if content:
-                        tokens = pattern.findall(content.lower())
-                        counter.update(tokens)
-                except (json.JSONDecodeError, KeyError):
+                except json.JSONDecodeError:
                     continue
+
+                content = extract_content(obj)
+                if content:
+                    tokens = pattern.findall(content.lower())
+                    counter.update(tokens)
 
     # Reserve slots for special tokens, fill rest with most frequent
     vocab = {tok: i for i, tok in enumerate(SPECIAL_TOKENS)}
@@ -107,7 +178,14 @@ def build_vocab_from_data(data_dir: str, vocab_size: int) -> Tuple[Dict[str, int
 # ============================================================================
 
 class JsonlTextDataset(Dataset):
-    """Handles nested JSONL structure: {"text": {"lang": "", "category": "", "content": ""}}"""
+    """
+    Mendukung 4 struktur JSONL:
+      1) {"prompt": "", "response": ""}
+      2) {"id": "", "kategori": "", "tingkat_kesulitan": number,
+          "messages": [{"role": "", "content": ""}]}
+      3) {"text": ""}
+      4) {"text": {"lang": "", "category": "", "content": ""}}   (struktur lama)
+    """
 
     def __init__(self, data_dir: str, vocab: Dict[str, int], context_window: int):
         self.vocab = vocab
@@ -115,12 +193,12 @@ class JsonlTextDataset(Dataset):
         self.tokens: List[int] = []
         self.pattern = re.compile(TOKENIZER_PATTERN, re.UNICODE)
 
-        jsonl_files = sorted(glob.glob(os.path.join(data_dir, "**/*.jsonl"), recursive=True))
-        if not jsonl_files:
-            raise FileNotFoundError(f"No .jsonl files found in {data_dir}")
+        jsonl_files = iter_jsonl_files(data_dir)
 
         print(f"📖 Loading {len(jsonl_files)} JSONL files...")
         doc_count = 0
+        skipped = 0
+
         for fpath in tqdm(jsonl_files, desc="Parsing"):
             with open(fpath, "r", encoding="utf-8") as f:
                 for line in f:
@@ -129,20 +207,20 @@ class JsonlTextDataset(Dataset):
                         continue
                     try:
                         obj = json.loads(line)
-                        content = ""
-                        if isinstance(obj.get("text"), dict):
-                            content = obj["text"].get("content", "")
-                        elif isinstance(obj.get("text"), str):
-                            content = obj["text"]
-
-                        if content:
-                            toks = self._tokenize(content)
-                            if toks:
-                                self.tokens.extend(toks)
-                                self.tokens.append(vocab["<eos>"])
-                                doc_count += 1
-                    except (json.JSONDecodeError, KeyError):
+                    except json.JSONDecodeError:
+                        skipped += 1
                         continue
+
+                    content = extract_content(obj)
+                    if not content:
+                        skipped += 1
+                        continue
+
+                    toks = self._tokenize(content)
+                    if toks:
+                        self.tokens.extend(toks)
+                        self.tokens.append(vocab["<eos>"])
+                        doc_count += 1
 
         if len(self.tokens) < context_window + 1:
             raise ValueError(
@@ -151,10 +229,9 @@ class JsonlTextDataset(Dataset):
             )
 
         self.doc_count = doc_count
-        print(f"✅ Total tokens: {len(self.tokens)} | Documents: {doc_count}")
+        print(f"✅ Total tokens: {len(self.tokens)} | Documents: {doc_count} | Skipped lines: {skipped}")
 
     def _tokenize(self, text: str) -> List[int]:
-        # Use stdlib-compatible pattern (same as build_vocab_from_data)
         raw_tokens = re.findall(TOKENIZER_PATTERN, text.lower(), re.UNICODE)
         unk_id = self.vocab.get("<unk>", 1)
         return [self.vocab.get(t, unk_id) for t in raw_tokens]
@@ -196,11 +273,10 @@ class TinyLMContextMLP(nn.Module):
         self.lm_head = nn.Linear(h, vocab_size)
 
     def forward(self, x):
-        # x: (batch, cw)
-        emb = self.embedding(x)             # (batch, cw, d)
-        emb_flat = emb.view(x.size(0), -1)  # (batch, cw * d)
-        hidden = self.context_mlp(emb_flat)  # (batch, h)
-        logits = self.lm_head(hidden)        # (batch, vocab_size)
+        emb = self.embedding(x)
+        emb_flat = emb.view(x.size(0), -1)
+        hidden = self.context_mlp(emb_flat)
+        logits = self.lm_head(hidden)
         return logits
 
 
@@ -209,11 +285,6 @@ class TinyLMContextMLP(nn.Module):
 # ============================================================================
 
 def save_model_bin(model: TinyLMContextMLP, output_path: str) -> List[Dict[str, Any]]:
-    """
-    Save model weights as raw float32 binary concatenated into one .bin
-    Order: E, W1, b1, W2, b2
-    Returns tensor metadata for manifest.
-    """
     state = model.state_dict()
 
     tensor_specs = [
@@ -255,10 +326,8 @@ def build_manifest(
     vocab_id_to_token: List[str],
     bin_path: str
 ) -> Dict[str, Any]:
-    """Build complete manifest.json conforming to schema_version 3."""
-
     param_count = sum(p.numel() for p in model.parameters())
-    param_bytes = param_count * 4  # float32
+    param_bytes = param_count * 4
 
     checksum_val = compute_sha256(bin_path)
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
@@ -302,7 +371,13 @@ def build_manifest(
                 "text_source": training_stats.get("dataset", "Dataset gabungan (JSONL)"),
                 "masking": "none",
                 "content_tokenization": True,
-                "captions_tokenization": False
+                "captions_tokenization": False,
+                "supported_jsonl_structures": [
+                    "prompt_response",
+                    "id_kategori_messages",
+                    "text_string",
+                    "text_object_content"
+                ]
             },
             "vocab": {
                 "size": model.vocab_size,
@@ -368,10 +443,8 @@ def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"🖥️  Using device: {device}")
 
-    # Step 1: Build vocab from actual dataset
     vocab, id_to_token = build_vocab_from_data(args.data_dir, args.vocab_size)
 
-    # Step 2: Load dataset
     dataset = JsonlTextDataset(args.data_dir, vocab, args.context_window)
     dataloader = DataLoader(
         dataset,
@@ -382,7 +455,6 @@ def train(args):
         pin_memory=True
     )
 
-    # Step 3: Initialize model
     model = TinyLMContextMLP(
         vocab_size=args.vocab_size,
         cw=args.context_window,
@@ -391,9 +463,8 @@ def train(args):
     ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    criterion = nn.CrossEntropyLoss(ignore_index=0)  # ignore <pad>
+    criterion = nn.CrossEntropyLoss(ignore_index=0)
 
-    # Checkpoint dirs
     os.makedirs("checkpoints/final", exist_ok=True)
 
     global_step = 0
@@ -420,9 +491,8 @@ def train(args):
             batch_x = batch_x.to(device, non_blocking=True)
             batch_y = batch_y.to(device, non_blocking=True)
 
-            # Forward: predict LAST next-token in context window
-            logits = model(batch_x)       # (batch, vocab_size)
-            target = batch_y[:, -1]       # (batch,) - last position target
+            logits = model(batch_x)
+            target = batch_y[:, -1]
 
             loss = criterion(logits, target)
 
@@ -435,7 +505,6 @@ def train(args):
             progress.update(1)
             progress.set_postfix(loss=f"{loss.item():.4f}")
 
-            # Save checkpoint every N batches
             if global_step % args.checkpoint_every == 0:
                 avg_loss = running_loss / args.checkpoint_every
                 elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
@@ -451,7 +520,7 @@ def train(args):
                     "loss": round(avg_loss, 6),
                     "best_loss": round(min(best_loss, avg_loss), 6),
                     "ema": round(avg_loss, 6),
-                    "dataset": "Dataset gabungan (JSONL)",
+                    "dataset": "Dataset gabungan (JSONL, 4 struktur)",
                     "tokens": len(dataset.tokens),
                     "docs": dataset.doc_count,
                     "elapsed": round(elapsed, 2),
@@ -465,7 +534,6 @@ def train(args):
                 with open(manifest_path, "w", encoding="utf-8") as f:
                     json.dump(manifest, f, indent=1, ensure_ascii=False)
 
-                # Track best and copy to final
                 if avg_loss < best_loss:
                     best_loss = avg_loss
                     import shutil
@@ -478,7 +546,6 @@ def train(args):
 
     progress.close()
 
-    # Ensure final checkpoint exists even if no improvement after last save
     final_bin = os.path.join("checkpoints/final", f"{MODEL_NAME}.bin")
     final_manifest = os.path.join("checkpoints/final", "manifest.json")
 
@@ -494,7 +561,7 @@ def train(args):
             "loss": round(final_avg, 6),
             "best_loss": round(best_loss, 6),
             "ema": round(final_avg, 6),
-            "dataset": "Dataset gabungan (JSONL)",
+            "dataset": "Dataset gabungan (JSONL, 4 struktur)",
             "tokens": len(dataset.tokens),
             "docs": dataset.doc_count,
             "elapsed": round(elapsed, 2),
@@ -532,4 +599,4 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_every", type=int, default=10, help="Save checkpoint every N batches")
 
     args = parser.parse_args()
-    train(args) 
+    train(args)
