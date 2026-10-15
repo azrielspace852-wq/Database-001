@@ -10,12 +10,13 @@ on:
       artifact_url:
         description: 'URL Artifact model (.zip)'
         required: true
-        default: 'https://github.com/azrielspace852-wq/Database-001/actions/runs/38754675398/artifacts/11983626200'
+        default: 'https://github.com/azrielspace852-wq/Database-001/actions/runs/38782894194/artifacts/11998050399'
 
 jobs:
   inference:
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 30
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -30,7 +31,9 @@ jobs:
 
       - name: Create chat.txt from input
         run: |
-          echo "${{ github.event.inputs.prompt }}" > chat.txt
+          cat > chat.txt << 'EOF'
+          ${{ github.event.inputs.prompt }}
+          EOF
           echo "📝 chat.txt created:"
           cat chat.txt
 
@@ -39,31 +42,59 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ARTIFACT_URL="${{ github.event.inputs.artifact_url }}"
-          # Extract artifact ID from URL
+
+          # Parse URL: https://github.com/OWNER/REPO/actions/runs/RUN_ID/artifacts/ARTIFACT_ID
+          REPO=$(echo "$ARTIFACT_URL" | sed -E 's|https://github.com/([^/]+/[^/]+)/actions/.*|\1|')
+          RUN_ID=$(echo "$ARTIFACT_URL" | grep -oP 'runs/\K[0-9]+')
           ARTIFACT_ID=$(echo "$ARTIFACT_URL" | grep -oP 'artifacts/\K[0-9]+')
-          
-          echo "Downloading artifact ID: $ARTIFACT_ID"
-          gh api \
+
+          echo "Repo:        $REPO"
+          echo "Run ID:      $RUN_ID"
+          echo "Artifact ID: $ARTIFACT_ID"
+
+          # Ambil nama artifact dari API
+          ARTIFACT_NAME=$(gh api \
             -H "Accept: application/vnd.github+json" \
-            "/repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" \
-            > model_artifact.zip
-          
+            "/repos/$REPO/actions/artifacts/$ARTIFACT_ID" \
+            --jq '.name')
+
+          echo "Artifact name: $ARTIFACT_NAME"
+
+          # gh run download handle redirect otomatis (beda dengan gh api)
+          gh run download "$RUN_ID" \
+            --repo "$REPO" \
+            --name "$ARTIFACT_NAME" \
+            --dir model_download
+
+          echo "=== Downloaded contents ==="
+          find model_download -type f
+
+          # Cari zip di dalam artifact
+          INNER_ZIP=$(find model_download -name "*.zip" -type f | head -1)
+          if [ -z "$INNER_ZIP" ]; then
+            echo "ERROR: No .zip inside artifact"
+            exit 1
+          fi
+          echo "Inner zip: $INNER_ZIP"
+          cp "$INNER_ZIP" model_artifact.zip
           ls -lh model_artifact.zip
-          echo "✅ Artifact downloaded"
+          echo "✅ Artifact ready"
 
       - name: Run Inference
-        run: python run_chat.py model_artifact.zip chat.txt response.txt
+        run: python inference.py model_artifact.zip chat.txt response.txt
 
       - name: Display Response
+        if: always()
         run: |
           echo "========================================="
           echo "🤖 MODEL RESPONSE:"
           echo "========================================="
-          cat response.txt
+          cat response.txt 2>/dev/null || echo "(response.txt not found)"
           echo ""
           echo "========================================="
 
       - name: Upload Response Artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: chat-response
@@ -71,3 +102,4 @@ jobs:
             response.txt
             chat.txt
           retention-days: 7
+          if-no-files-found: warn
