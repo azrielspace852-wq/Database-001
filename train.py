@@ -36,7 +36,10 @@ from tqdm import tqdm
 # This is the closest stdlib equivalent without requiring 'regex' package
 TOKENIZER_PATTERN = r"\w+|[^\s\w]"
 SPECIAL_TOKENS = ["<pad>", "<unk>", "<bos>", "<eos>"]
-
+MODEL_NAME     = "tinylm-contextmlp"
+ARCHITECTURE   = "TinyLMContextMLP"
+FORMAT_VERSION = "1.0.0"
+SCHEMA_VERSION = 3
 
 # ============================================================================
 # VOCABULARY BUILDER (FIXED)
