@@ -28,24 +28,24 @@ from tqdm import tqdm
 
 
 # ============================================================================
-# CONFIGURATION & CONSTANTS
+# CONFIGURATION & CONSTANTS (UPDATED)
 # ============================================================================
 
-MODEL_NAME = "kicau1-nano-lite"
-ARCHITECTURE = "TinyLM-ContextMLP"
-SCHEMA_VERSION = 3
-FORMAT_VERSION = "3.0.0"
-TOKENIZER_PATTERN = r"\p{L}[\p{L}\p{M}]*|\p{N}+|[^\s]"
+# Python re-compatible pattern (equivalent to \p{L}[\p{L}\p{M}]*|\p{N}+|[^\s])
+# \w matches [a-zA-Z0-9_] + Unicode letters/digits in Python 3 with re.UNICODE
+# This is the closest stdlib equivalent without requiring 'regex' package
+TOKENIZER_PATTERN = r"\w+|[^\s\w]"
 SPECIAL_TOKENS = ["<pad>", "<unk>", "<bos>", "<eos>"]
 
 
 # ============================================================================
-# VOCABULARY BUILDER
+# VOCABULARY BUILDER (FIXED)
 # ============================================================================
 
 def build_vocab_from_data(data_dir: str, vocab_size: int) -> Tuple[Dict[str, int], List[str]]:
     """
     Build vocabulary from actual dataset content.
+    Uses Python stdlib re (no \p{} support needed).
     Returns (token_to_id dict, id_to_token list).
     """
     counter = Counter()
@@ -55,6 +55,7 @@ def build_vocab_from_data(data_dir: str, vocab_size: int) -> Tuple[Dict[str, int
         raise FileNotFoundError(f"No .jsonl files found in {data_dir}")
 
     print(f"📚 Building vocab from {len(jsonl_files)} files...")
+    # Use stdlib-compatible pattern with re.UNICODE flag
     pattern = re.compile(TOKENIZER_PATTERN, re.UNICODE)
 
     for fpath in tqdm(jsonl_files, desc="Scanning tokens"):
@@ -150,7 +151,8 @@ class JsonlTextDataset(Dataset):
         print(f"✅ Total tokens: {len(self.tokens)} | Documents: {doc_count}")
 
     def _tokenize(self, text: str) -> List[int]:
-        raw_tokens = self.pattern.findall(text.lower())
+        # Use stdlib-compatible pattern (same as build_vocab_from_data)
+        raw_tokens = re.findall(TOKENIZER_PATTERN, text.lower(), re.UNICODE)
         unk_id = self.vocab.get("<unk>", 1)
         return [self.vocab.get(t, unk_id) for t in raw_tokens]
 
