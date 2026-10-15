@@ -6,7 +6,7 @@ on:
       context_window:
         description: 'Context Window Size'
         required: true
-        default: '5000'
+        default: '16'
       batch_size:
         description: 'Batch Size'
         required: true
@@ -14,12 +14,17 @@ on:
       max_steps:
         description: 'Max Training Steps'
         required: true
-        default: '10000'
+        default: '3000'
+
+concurrency:
+  group: pretrain-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   pretrain:
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 360
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -51,7 +56,7 @@ jobs:
           MAX_STEPS: ${{ github.event.inputs.max_steps }}
           VOCAB_SIZE: 5000
           EMBEDDING_DIM_H: 125
-          EMBEDDING_DIM_D: 156
+          EMBEDDING_DIM_D: 125
           MAX_OUTPUT_TOKENS: 2084
           CHECKPOINT_INTERVAL: 10
         run: |
@@ -66,17 +71,35 @@ jobs:
             --max_output_tokens $MAX_OUTPUT_TOKENS \
             --checkpoint_every $CHECKPOINT_INTERVAL
 
+      - name: Debug — list checkpoints
+        if: always()
+        run: |
+          echo "=== checkpoints/ ==="
+          ls -lah checkpoints/ 2>/dev/null || echo "(checkpoints/ not found)"
+          echo "=== checkpoints/final/ ==="
+          ls -lah checkpoints/final/ 2>/dev/null || echo "(checkpoints/final/ not found)"
+
       - name: Package Final Model
+        if: always()
         run: |
           mkdir -p release
-          cp checkpoints/final/model.bin release/
-          cp checkpoints/final/manifest.json release/
+          if ls checkpoints/final/*.bin >/dev/null 2>&1; then
+            cp checkpoints/final/*.bin release/
+          else
+            echo "WARNING: No .bin file found in checkpoints/final/"
+            exit 1
+          fi
+          cp checkpoints/final/manifest.json release/ 2>/dev/null || echo "WARNING: manifest.json not found"
           cd release
           zip -r ../kicau-model-release.zip .
+          cd ..
+          ls -lh kicau-model-release.zip
 
       - name: Upload Artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: kicau-pretrained-model
           path: kicau-model-release.zip
           retention-days: 30
+          if-no-files-found: warn
