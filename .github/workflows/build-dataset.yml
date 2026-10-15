@@ -1,0 +1,108 @@
+name: Build Dataset (500M tokens → axion-ai Release)
+
+on:
+  workflow_dispatch:
+    inputs:
+      chunk_tokens:
+        description: 'Token per chunk (25M × 20 = 500M)'
+        default: '25000000'
+      total_chunks:
+        description: 'Total chunk'
+        default: '20'
+      release_tag:
+        description: 'Tag release target'
+        default: 'dataset-v1.0'
+      target_repo:
+        description: 'Repo target release (owner/axion-ai)'
+        default: 'axion-ai'          # ganti ke <username>/axion-ai kalau perlu
+      max_parallel:
+        description: 'Job paralel (2–3 aman untuk Wikipedia)'
+        default: '2'
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - id: set
+        run: |
+          python3 -c "
+          import json
+          n = int('${{ inputs.total_chunks }}')
+          print('matrix=' + json.dumps({'chunk': list(range(n))}))
+          " >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(inputs.max_parallel) }}
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: pip install requests
+
+      - name: Build chunk ${{ matrix.chunk }}
+        run: |
+          OUT="dataset_part_$(printf '%03d' ${{ matrix.chunk }}).jsonl.gz"
+          python scripts/build_chunk.py \
+            --chunk-id ${{ matrix.chunk }} \
+            --chunk-tokens ${{ inputs.chunk_tokens }} \
+            --output "$OUT"
+          ls -lh "$OUT"
+
+      - name: Ensure release exists
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          # TIDAK ada echo, print, atau set -x di step ini
+          REPO="${{ inputs.target_repo }}"
+          TAG="${{ inputs.release_tag }}"
+          gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 || \
+            gh release create "$TAG" --repo "$REPO" \
+              --title "Dataset ${TAG}" \
+              --notes "Dataset JSONL gzip — target 500 juta token (9 bahasa).
+
+Format per baris:
+\`\`\`json
+{\"text\": {\"lang\": \"en\", \"category\": \"Physics\", \"content\": \"...\"}}
+\`\`\`
+
+Konsumsi:
+\`\`\`bash
+gh release download ${TAG} --repo ${REPO} -D ./dataset
+zcat dataset/dataset_part_*.jsonl.gz | head
+\`\`\`"
+
+      - name: Upload chunk to release
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          gh release upload \
+            "${{ inputs.release_tag }}" \
+            dataset_part_*.jsonl.gz \
+            --repo "${{ inputs.target_repo }}" \
+            --clobber
+
+  summary:
+    needs: [build]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ringkasan
+        run: |
+          echo "### 📦 Dataset build selesai"                    >> $GITHUB_STEP_SUMMARY
+          echo ""                                                 >> $GITHUB_STEP_SUMMARY
+          echo "- Chunk: **${{ inputs.total_chunks }}** × **${{ inputs.chunk_tokens }}** token" >> $GITHUB_STEP_SUMMARY
+          echo "- Total target: **500.000.000 token**"            >> $GITHUB_STEP_SUMMARY
+          echo "- Repo target: \`${{ inputs.target_repo }}\`"     >> $GITHUB_STEP_SUMMARY
+          echo "- Release: [\`${{ inputs.release_tag }}\`](https://github.com/${{ inputs.target_repo }}/releases/tag/${{ inputs.release_tag }})" >> $GITHUB_STEP_SUMMARY 
