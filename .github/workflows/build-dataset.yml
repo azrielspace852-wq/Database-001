@@ -6,40 +6,141 @@ on:
       chunk_tokens:
         description: 'Token per chunk (25M × 20 = 500M)'
         default: '25000000'
+        required: true
+        type: string
       total_chunks:
         description: 'Total chunk'
         default: '20'
+        required: true
+        type: string
       release_tag:
         description: 'Tag release target'
         default: 'dataset-v1.0'
+        required: true
+        type: string
       target_repo:
-        description: 'Repo target release (owner/axion-ai)'
-        default: 'axion-ai'          # ganti ke <username>/axion-ai kalau perlu
+        description: 'Repo target release (owner/repo)'
+        default: 'azrielspace852-wq/axion-ai'
+        required: true
+        type: string
       max_parallel:
-        description: 'Job paralel (2–3 aman untuk Wikipedia)'
+        description: 'Job paralel (1–3 aman untuk Wikipedia)'
         default: '2'
+        required: true
+        type: string
+
+permissions:
+  contents: write
 
 jobs:
+  # ------------------------------------------------------------------
+  # 1) Validasi input + buat release SEKALI (hindari race condition)
+  # ------------------------------------------------------------------
   prepare:
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.set.outputs.matrix }}
+      matrix:       ${{ steps.set.outputs.matrix }}
+      total_chunks: ${{ steps.validate.outputs.total_chunks }}
+      max_parallel: ${{ steps.validate.outputs.max_parallel }}
+      chunk_tokens: ${{ steps.validate.outputs.chunk_tokens }}
+      release_tag:  ${{ steps.validate.outputs.release_tag }}
+      target_repo:  ${{ steps.validate.outputs.target_repo }}
     steps:
-      - id: set
+      - name: Validate inputs
+        id: validate
+        env:
+          IN_TOTAL_CHUNKS: ${{ inputs.total_chunks }}
+          IN_MAX_PARALLEL: ${{ inputs.max_parallel }}
+          IN_CHUNK_TOKENS: ${{ inputs.chunk_tokens }}
+          IN_RELEASE_TAG:  ${{ inputs.release_tag }}
+          IN_TARGET_REPO:  ${{ inputs.target_repo }}
         run: |
-          python3 -c "
-          import json
-          n = int('${{ inputs.total_chunks }}')
-          print('matrix=' + json.dumps({'chunk': list(range(n))}))
-          " >> "$GITHUB_OUTPUT"
+          python3 - <<'PY'
+          import os, re, sys
 
+          def emit(k, v):
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write(f"{k}={v}\n")
+
+          tc = os.environ['IN_TOTAL_CHUNKS'].strip()
+          mp = os.environ['IN_MAX_PARALLEL'].strip()
+          ct = os.environ['IN_CHUNK_TOKENS'].strip()
+          rt = os.environ['IN_RELEASE_TAG'].strip()
+          tr = os.environ['IN_TARGET_REPO'].strip()
+
+          if not tc.isdigit() or not (1 <= int(tc) <= 200):
+              sys.exit(f"total_chunks invalid: {tc!r}")
+          if not mp.isdigit() or not (1 <= int(mp) <= 3):
+              sys.exit(f"max_parallel invalid (1-3): {mp!r}")
+          if not ct.isdigit() or int(ct) <= 0:
+              sys.exit(f"chunk_tokens invalid: {ct!r}")
+          if not re.match(r'^[^/\s]+/[^/\s]+$', tr):
+              sys.exit(f"target_repo harus owner/repo: {tr!r}")
+          if not re.match(r'^[\w.\-/]+$', rt):
+              sys.exit(f"release_tag invalid: {rt!r}")
+
+          emit('total_chunks', tc)
+          emit('max_parallel', mp)
+          emit('chunk_tokens', ct)
+          emit('release_tag',  rt)
+          emit('target_repo',  tr)
+          PY
+
+      - name: Build matrix
+        id: set
+        env:
+          TC: ${{ steps.validate.outputs.total_chunks }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          n = int(os.environ['TC'])
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write("matrix=" + json.dumps({"chunk": list(range(n))}) + "\n")
+          PY
+
+      - name: Ensure release exists (single writer)
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          REPO: ${{ steps.validate.outputs.target_repo }}
+          TAG:  ${{ steps.validate.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "✔ Release $TAG sudah ada di $REPO"
+            exit 0
+          fi
+
+          # Bangun notes tanpa backtick mentah (aman dari quoting bash)
+          {
+            echo "Dataset JSONL gzip — target 500 juta token (9 bahasa)."
+            echo ""
+            echo "Format per baris:"
+            echo '```json'
+            echo '{"text": {"lang": "en", "category": "Physics", "content": "..."}}'
+            echo '```'
+            echo ""
+            echo "Konsumsi:"
+            echo '```bash'
+            echo "gh release download ${TAG} --repo ${REPO} -D ./dataset"
+            echo 'zcat dataset/dataset_part_*.jsonl.gz | head'
+            echo '```'
+          } > /tmp/notes.md
+
+          gh release create "$TAG" --repo "$REPO" \
+            --title "Dataset ${TAG}" \
+            --notes-file /tmp/notes.md
+          echo "✔ Release $TAG dibuat"
+
+  # ------------------------------------------------------------------
+  # 2) Build chunk paralel → upload sebagai artifact
+  # ------------------------------------------------------------------
   build:
     needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 350
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJSON(inputs.max_parallel) }}
+      max-parallel: ${{ fromJSON(needs.prepare.outputs.max_parallel) }}
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
 
     steps:
@@ -49,60 +150,100 @@ jobs:
         with:
           python-version: '3.11'
 
-      - run: pip install requests
+      - name: Install deps
+        run: pip install --no-cache-dir requests
 
       - name: Build chunk ${{ matrix.chunk }}
+        env:
+          CHUNK_ID:     ${{ matrix.chunk }}
+          CHUNK_TOKENS: ${{ needs.prepare.outputs.chunk_tokens }}
         run: |
-          OUT="dataset_part_$(printf '%03d' ${{ matrix.chunk }}).jsonl.gz"
+          set -euo pipefail
+          OUT="dataset_part_$(printf '%03d' "$CHUNK_ID").jsonl.gz"
           python scripts/build_chunk.py \
-            --chunk-id ${{ matrix.chunk }} \
-            --chunk-tokens ${{ inputs.chunk_tokens }} \
+            --chunk-id "$CHUNK_ID" \
+            --chunk-tokens "$CHUNK_TOKENS" \
             --output "$OUT"
           ls -lh "$OUT"
 
-      - name: Ensure release exists
+      - name: Upload artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dataset-part-${{ matrix.chunk }}
+          path: dataset_part_*.jsonl.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  # ------------------------------------------------------------------
+  # 3) Publish: satu job, download semua artifact, upload ke release
+  # ------------------------------------------------------------------
+  publish:
+    needs: [prepare, build]
+    if: always() && needs.prepare.result == 'success' && needs.build.result != 'cancelled'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: dataset-part-*
+          merge-multiple: true
+
+      - name: Sanity check
+        id: check
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(artifacts/dataset_part_*.jsonl.gz)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::warning::Tidak ada file dataset untuk diupload."
+            echo "have=0" >> "$GITHUB_OUTPUT"
+          else
+            ls -lh "${files[@]}"
+            echo "have=${#files[@]}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload chunks to release
+        if: steps.check.outputs.have != '0'
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
+          REPO: ${{ needs.prepare.outputs.target_repo }}
+          TAG:  ${{ needs.prepare.outputs.release_tag }}
         run: |
-          # TIDAK ada echo, print, atau set -x di step ini
-          REPO="${{ inputs.target_repo }}"
-          TAG="${{ inputs.release_tag }}"
-          gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 || \
-            gh release create "$TAG" --repo "$REPO" \
-              --title "Dataset ${TAG}" \
-              --notes "Dataset JSONL gzip — target 500 juta token (9 bahasa).
+          set -euo pipefail
+          shopt -s nullglob
+          cd artifacts
+          for f in dataset_part_*.jsonl.gz; do
+            echo "↑ Upload $f"
+            gh release upload "$TAG" "$f" --repo "$REPO" --clobber
+          done
 
-Format per baris:
-\`\`\`json
-{\"text\": {\"lang\": \"en\", \"category\": \"Physics\", \"content\": \"...\"}}
-\`\`\`
-
-Konsumsi:
-\`\`\`bash
-gh release download ${TAG} --repo ${REPO} -D ./dataset
-zcat dataset/dataset_part_*.jsonl.gz | head
-\`\`\`"
-
-      - name: Upload chunk to release
-        env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
-        run: |
-          gh release upload \
-            "${{ inputs.release_tag }}" \
-            dataset_part_*.jsonl.gz \
-            --repo "${{ inputs.target_repo }}" \
-            --clobber
-
+  # ------------------------------------------------------------------
+  # 4) Summary
+  # ------------------------------------------------------------------
   summary:
-    needs: [build]
+    needs: [prepare, build, publish]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Ringkasan
+        env:
+          TC:  ${{ needs.prepare.outputs.total_chunks }}
+          CT:  ${{ needs.prepare.outputs.chunk_tokens }}
+          REPO: ${{ needs.prepare.outputs.target_repo }}
+          TAG:  ${{ needs.prepare.outputs.release_tag }}
+          BR:   ${{ needs.build.result }}
+          PR:   ${{ needs.publish.result }}
         run: |
-          echo "### 📦 Dataset build selesai"                    >> $GITHUB_STEP_SUMMARY
-          echo ""                                                 >> $GITHUB_STEP_SUMMARY
-          echo "- Chunk: **${{ inputs.total_chunks }}** × **${{ inputs.chunk_tokens }}** token" >> $GITHUB_STEP_SUMMARY
-          echo "- Total target: **500.000.000 token**"            >> $GITHUB_STEP_SUMMARY
-          echo "- Repo target: \`${{ inputs.target_repo }}\`"     >> $GITHUB_STEP_SUMMARY
-          echo "- Release: [\`${{ inputs.release_tag }}\`](https://github.com/${{ inputs.target_repo }}/releases/tag/${{ inputs.release_tag }})" >> $GITHUB_STEP_SUMMARY 
+          {
+            echo "### 📦 Dataset build selesai"
+            echo ""
+            echo "- Chunk: **${TC}** × **${CT}** token"
+            echo "- Total target: **500.000.000 token**"
+            echo "- Repo target: \`${REPO}\`"
+            echo "- Release: [\`${TAG}\`](https://github.com/${REPO}/releases/tag/${TAG})"
+            echo "- Build status:   **${BR}**"
+            echo "- Publish status: **${PR}**"
+          } >> "$GITHUB_STEP_SUMMARY"
