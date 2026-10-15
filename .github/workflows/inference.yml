@@ -1,0 +1,73 @@
+name: TinyLM Chat Inference
+
+on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: 'Pesan untuk model (akan disimpan ke chat.txt)'
+        required: true
+        default: 'Hello, tell me about the garden'
+      artifact_url:
+        description: 'URL Artifact model (.zip)'
+        required: true
+        default: 'https://github.com/azrielspace852-wq/Database-001/actions/runs/38754675398/artifacts/11983626200'
+
+jobs:
+  inference:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install numpy
+
+      - name: Create chat.txt from input
+        run: |
+          echo "${{ github.event.inputs.prompt }}" > chat.txt
+          echo "📝 chat.txt created:"
+          cat chat.txt
+
+      - name: Download Model Artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ARTIFACT_URL="${{ github.event.inputs.artifact_url }}"
+          # Extract artifact ID from URL
+          ARTIFACT_ID=$(echo "$ARTIFACT_URL" | grep -oP 'artifacts/\K[0-9]+')
+          
+          echo "Downloading artifact ID: $ARTIFACT_ID"
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" \
+            > model_artifact.zip
+          
+          ls -lh model_artifact.zip
+          echo "✅ Artifact downloaded"
+
+      - name: Run Inference
+        run: python run_chat.py model_artifact.zip chat.txt response.txt
+
+      - name: Display Response
+        run: |
+          echo "========================================="
+          echo "🤖 MODEL RESPONSE:"
+          echo "========================================="
+          cat response.txt
+          echo ""
+          echo "========================================="
+
+      - name: Upload Response Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: chat-response
+          path: |
+            response.txt
+            chat.txt
+          retention-days: 7
