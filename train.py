@@ -1,199 +1,450 @@
-import os
-import json
-import zipfile
-import glob
-import numpy as np
-from datetime import datetime, timezone
+#!/usr/bin/env python3
+"""
+TinyLM-ContextMLP Pretraining Script
+Architecture: Embedding -> ContextMLP (Dense+Tanh) -> LMHead (Dense+Softmax)
+Target: Web-ready .bin format with manifest.json
+"""
 
-# --- Konfigurasi Hyperparameter ---
-CONTEXT_WINDOW = 5000
-BATCH_SIZE = 100
-VOCAB_SIZE = 5000
-EMBEDDING_H = 125
-EMBEDDING_D = 156
-MAX_OUTPUT_TOKENS = 2084
-MAX_STEPS = 10000
-CHECKPOINT_INTERVAL = 10
+import os
+import sys
+import json
+import struct
+import hashlib
+import argparse
+import glob
+from datetime import datetime, timezone
+from typing import List, Dict, Any
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+from tqdm import tqdm
+
+
+# ============================================================================
+# CONFIGURATION & CONSTANTS
+# ============================================================================
 
 MODEL_NAME = "kicau1-nano-lite"
-OUTPUT_DIR = "output"
-CHECKPOINT_DIR = "checkpoints"
+ARCHITECTURE = "TinyLM-ContextMLP"
+SCHEMA_VERSION = 3
+FORMAT_VERSION = "3.0.0"
+TOKENIZER_PATTERN = r"\p{L}[\p{L}\p{M}]*|\p{N}+|[^\s]"
+SPECIAL_TOKENS = ["<pad>", "<unk>", "<bos>", "<eos>"]
 
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
-def extract_dataset():
-    zip_path = "dataset.zip"
-    if not os.path.exists(zip_path):
-        raise FileNotFoundError(f"File {zip_path} tidak ditemukan! Pastikan dataset.zip sudah diunggah.")
+# ============================================================================
+# DATASET
+# ============================================================================
+
+class JsonlTextDataset(Dataset):
+    """Handles nested JSONL structure: {"text": {"lang": "", "category": "", "content": ""}}"""
     
-    print("Mengekstrak dataset.zip...")
-    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-        zip_ref.extractall("extracted_dataset")
-    print("Ekstraksi dataset selesai.")
-
-def load_jsonl_data():
-    contents = []
-    jsonl_files = glob.glob("extracted_dataset/**/*.jsonl", recursive=True)
-    if not jsonl_files:
-        jsonl_files = glob.glob("extracted_dataset/*.jsonl", recursive=True)
+    def __init__(self, data_dir: str, vocab: Dict[str, int], context_window: int):
+        self.vocab = vocab
+        self.context_window = context_window
+        self.tokens: List[int] = []
         
-    for file_path in jsonl_files:
-        with open(file_path, "r", encoding="utf-8") as f:
-            for line in f:
-                if line.strip():
-                    try:
-                        data = json.loads(line)
-                        # Sesuai struktur dataset: {"text": {"lang": "", "category": "", "content": ""}}
-                        text_obj = data.get("text", {})
-                        content = text_obj.get("content", "")
-                        if content:
-                            contents.append(content)
-                    except json.JSONDecodeError:
-                        continue
-    return contents
-
-def simple_tokenize(texts, vocab_size):
-    # Tokenizer sederhana berbasis karakter/kata untuk simulasi pre-training web-ready
-    vocab = [f"<pad>", f"<unk>", f"<bos>", f"<eos>"]
-    tokens_list = []
-    for text in texts:
-        tokens = [ord(c) % vocab_size for c in text]
-        tokens_list.extend(tokens)
-    return tokens_list
-
-def initialize_weights():
-    # Inisialisasi bobot tensor berdasarkan dimensi H, D, dan Vocab Size
-    np.random.seed(42)
-    weights = {
-        "E": np.random.randn(VOCAB_SIZE, EMBEDDING_H).astype(np.float32) * 0.1,
-        "W1": np.random.randn(EMBEDDING_D, EMBEDDING_H).astype(np.float32) * 0.1,
-        "b1": np.zeros((EMBEDDING_H,), dtype=np.float32),
-        "W2": np.random.randn(EMBEDDING_H, VOCAB_SIZE).astype(np.float32) * 0.1,
-        "b2": np.zeros((VOCAB_SIZE,), dtype=np.float32)
-    }
-    return weights
-
-def save_checkpoint(step, weights, loss_val):
-    ckpt_path = os.path.join(CHECKPOINT_DIR, f"checkpoint_step_{step}.bin")
-    with open(ckpt_path, "wb") as f:
-        for k in ["E", "W1", "b1", "W2", "b2"]:
-            f.write(weights[k].tobytes())
-    print(f"Checkpoint disimpan di step {step} (Loss: {loss_val:.4f})")
-
-def save_final_model_and_manifest(weights, final_loss, total_tokens, total_docs):
-    bin_filename = f"{MODEL_NAME}.bin"
-    bin_path = os.path.join(OUTPUT_DIR, bin_filename)
-    
-    # 1. Simpan Model Binary (.bin)
-    with open(bin_path, "wb") as f:
-        for k in ["E", "W1", "b1", "W2", "b2"]:
-            f.write(weights[k].tobytes())
+        jsonl_files = sorted(glob.glob(os.path.join(data_dir, "**/*.jsonl"), recursive=True))
+        if not jsonl_files:
+            raise FileNotFoundError(f"No .jsonl files found in {data_dir}")
             
-    # 2. Buat Manifest.json (Mengikuti standar struktur metadata yang kompatibel)[span_2](start_span)[span_2](end_span)
+        print(f"Loading {len(jsonl_files)} JSONL files...")
+        for fpath in tqdm(jsonl_files, desc="Parsing"):
+            with open(fpath, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                        # Handle nested structure safely
+                        content = ""
+                        if isinstance(obj.get("text"), dict):
+                            content = obj["text"].get("content", "")
+                        elif isinstance(obj.get("text"), str):
+                            content = obj["text"]
+                        
+                        if content:
+                            toks = self._tokenize(content)
+                            self.tokens.extend(toks)
+                            self.tokens.append(vocab["<eos>"])
+                    except (json.JSONDecodeError, KeyError):
+                        continue
+        
+        if len(self.tokens) < context_window + 1:
+            raise ValueError(f"Insufficient tokens ({len(self.tokens)}) for context_window {context_window}")
+            
+        print(f"Total tokens loaded: {len(self.tokens)}")
+
+    def _tokenize(self, text: str) -> List[int]:
+        """Simple whitespace + punctuation tokenizer matching AXION regex pattern."""
+        import re
+        pattern = r"\w+|[^\s\w]"
+        raw_tokens = re.findall(pattern, text.lower())
+        return [self.vocab.get(t, self.vocab["<unk>"]) for t in raw_tokens]
+
+    def __len__(self):
+        return max(0, len(self.tokens) - self.context_window)
+
+    def __getitem__(self, idx):
+        x = self.tokens[idx : idx + self.context_window]
+        y = self.tokens[idx + 1 : idx + self.context_window + 1]
+        return torch.tensor(x, dtype=torch.long), torch.tensor(y, dtype=torch.long)
+
+
+# ============================================================================
+# MODEL DEFINITION
+# ============================================================================
+
+class TinyLMContextMLP(nn.Module):
+    """
+    Architecture:
+      - Embedding(VocabSize, D)
+      - ContextMLP: Linear(cw * D -> H) + Tanh
+      - LMHead: Linear(H -> VocabSize) + Softmax (applied in loss)
+    """
+    
+    def __init__(self, vocab_size: int, cw: int, d: int, h: int):
+        super().__init__()
+        self.cw = cw
+        self.d = d
+        self.h = h
+        self.vocab_size = vocab_size
+        
+        self.embedding = nn.Embedding(vocab_size, d, padding_idx=0)
+        self.context_mlp = nn.Sequential(
+            nn.Linear(cw * d, h),
+            nn.Tanh()
+        )
+        self.lm_head = nn.Linear(h, vocab_size)
+        
+    def forward(self, x):
+        # x: (batch, cw)
+        emb = self.embedding(x)           # (batch, cw, d)
+        emb_flat = emb.view(x.size(0), -1) # (batch, cw * d)
+        hidden = self.context_mlp(emb_flat) # (batch, h)
+        logits = self.lm_head(hidden)      # (batch, vocab_size)
+        return logits
+
+
+# ============================================================================
+# BINARY SERIALIZATION (Web-Compatible)
+# ============================================================================
+
+def save_model_bin(model: TinyLMContextMLP, output_path: str) -> Dict[str, Any]:
+    """
+    Save model weights as raw float32 binary tensor files concatenated into one .bin
+    Returns tensor metadata for manifest.
+    Order: E, W1, b1, W2, b2
+    """
+    state = model.state_dict()
+    
+    tensor_specs = [
+        ("E",  state["embedding.weight"],   [model.vocab_size, model.d]),
+        ("W1", state["context_mlp.0.weight"], [model.cw * model.d, model.h]),
+        ("b1", state["context_mlp.0.bias"],   [model.h]),
+        ("W2", state["lm_head.weight"],       [model.h, model.vocab_size]),
+        ("b2", state["lm_head.bias"],         [model.vocab_size]),
+    ]
+    
+    tensors_meta = []
+    with open(output_path, "wb") as f:
+        for name, tensor, shape in tensor_specs:
+            arr = tensor.detach().cpu().numpy().astype(np.float32)
+            # Ensure contiguous C-order
+            arr = np.ascontiguousarray(arr.flatten())
+            f.write(arr.tobytes())
+            tensors_meta.append({
+                "name": name,
+                "dtype": "float32",
+                "shape": shape,
+                "length": int(arr.size)
+            })
+    
+    return tensors_meta
+
+
+def compute_sha256(filepath: str) -> str:
+    sha = hashlib.sha256()
+    with open(filepath, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            sha.update(chunk)
+    return sha.hexdigest()
+
+
+def build_manifest(
+    model: TinyLMContextMLP,
+    tensors_meta: List[Dict],
+    training_stats: Dict,
+    vocab_id_to_token: List[str],
+    bin_path: str
+) -> Dict[str, Any]:
+    """Build complete manifest.json conforming to schema_version 3."""
+    
+    param_count = sum(p.numel() for p in model.parameters())
+    param_bytes = param_count * 4  # float32
+    
+    checksum_val = compute_sha256(bin_path)
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    
     manifest = {
-      "format": "mini-lab-ai-model",
-      "version": "3.0.0",
-      "schema_version": 3,
-      "model": {
-        "name": MODEL_NAME,
-        "file": bin_filename,
-        "architecture": "TinyLM-ContextMLP",
-        "input_shape": [CONTEXT_WINDOW, EMBEDDING_H],
-        "output_shape": [VOCAB_SIZE],
-        "layers": [
-          {"name": "embedding", "type": "Embedding", "output_shape": [CONTEXT_WINDOW, EMBEDDING_H]},
-          {"name": "context_mlp", "type": "Dense+Tanh", "output_shape": [EMBEDDING_H]},
-          {"name": "language_model_head", "type": "Dense+Softmax", "output_shape": [VOCAB_SIZE]}
-        ],
-        "optimizer": "Adam",
-        "loss": "cross-entropy",
-        "hyperparameters": {
-          "cw": CONTEXT_WINDOW,
-          "D": EMBEDDING_D,
-          "H": EMBEDDING_H,
-          "max_output_tokens": MAX_OUTPUT_TOKENS
-        },
-        "configuration": {
-          "model_type": "pretrain",
-          "parameter_count": int(sum(w.size for w in weights.values())),
-          "parameter_bytes_float32": int(sum(w.nbytes for w in weights.values()))
-        },
-        "tensors": [
-          {"name": "E", "dtype": "float32", "shape": list(weights["E"].shape), "length": weights["E"].size},
-          {"name": "W1", "dtype": "float32", "shape": list(weights["W1"].shape), "length": weights["W1"].size},
-          {"name": "b1", "dtype": "float32", "shape": list(weights["b1"].shape), "length": weights["b1"].size},
-          {"name": "W2", "dtype": "float32", "shape": list(weights["W2"].shape), "length": weights["W2"].size},
-          {"name": "b2", "dtype": "float32", "shape": list(weights["b2"].shape), "length": weights["b2"].size}
-        ],
-        "tokenizer": {
-          "type": "AXION AI-Lab regex tokenizer",
-          "pattern": "\\p{L}[\\p{L}\\p{M}]*|\\p{N}+|[^\\s]",
-          "special_tokens": ["<pad>", "<unk>", "<bos>", "<eos>"]
-        },
-        "vocab": {
-          "size": VOCAB_SIZE
+        "format": "mini-lab-ai-model",
+        "version": FORMAT_VERSION,
+        "schema_version": SCHEMA_VERSION,
+        "model": {
+            "name": MODEL_NAME,
+            "file": f"{MODEL_NAME}.bin",
+            "architecture": ARCHITECTURE,
+            "input_shape": [model.cw, model.d],
+            "output_shape": [model.vocab_size],
+            "layers": [
+                {"name": "embedding", "type": "Embedding", "output_shape": [model.cw, model.d]},
+                {"name": "context_mlp", "type": "Dense+Tanh", "output_shape": [model.h]},
+                {"name": "language_model_head", "type": "Dense+Softmax", "output_shape": [model.vocab_size]}
+            ],
+            "optimizer": "Adam",
+            "loss": "cross-entropy",
+            "metrics": [],
+            "hyperparameters": {
+                "cw": model.cw,
+                "D": model.d,
+                "H": model.h
+            },
+            "configuration": {
+                "model_type": "pretrain",
+                "cfg": {"cw": model.cw, "D": model.d, "H": model.h},
+                "parameter_count": param_count,
+                "parameter_bytes_float32": param_bytes
+            },
+            "tensors": tensors_meta,
+            "tokenizer": {
+                "type": "AXION AI-Lab regex tokenizer",
+                "pattern": TOKENIZER_PATTERN,
+                "special_tokens": SPECIAL_TOKENS
+            },
+            "preprocessing": {
+                "text_source": "Dataset gabungan (JSONL)",
+                "masking": "none",
+                "content_tokenization": True,
+                "captions_tokenization": False
+            },
+            "vocab": {
+                "size": model.vocab_size,
+                "id_to_token": vocab_id_to_token
+            },
+            "labels": []
         },
         "metadata": {
-          "id": "model_pretrain_gha",
-          "type": "pretrain",
-          "stats": {
-            "steps": MAX_STEPS,
-            "loss": float(final_loss),
-            "tokens": total_tokens,
-            "docs": total_docs
-          }
+            "id": hashlib.md5(now_iso.encode()).hexdigest()[:10],
+            "type": "pretrain",
+            "parent_id": None,
+            "stats": training_stats
+        },
+        "text_model": {
+            "architecture": ARCHITECTURE,
+            "cfg": {"cw": model.cw, "D": model.d, "H": model.h},
+            "vocab_size": model.vocab_size,
+            "tokenizer": {
+                "type": "AXION AI-Lab regex tokenizer",
+                "pattern": TOKENIZER_PATTERN,
+                "special_tokens": SPECIAL_TOKENS
+            },
+            "binary_tensors": [t["name"] for t in tensors_meta]
+        },
+        "multimodal": {"enabled": False, "encoders": []},
+        "training": {
+            "last_loss": training_stats.get("loss", 0),
+            "best_loss": training_stats.get("loss", 0),
+            "epoch": training_stats.get("epoch", 0),
+            "step": training_stats.get("steps", 0),
+            "accuracy": 0,
+            "val_loss": 0,
+            "val_accuracy": 0,
+            "learning_rate": training_stats.get("lr", 0),
+            "batch_size": training_stats.get("batch_size", 0),
+            "dataset": {
+                "name": training_stats.get("dataset", ""),
+                "tokens": training_stats.get("tokens", 0),
+                "documents": training_stats.get("docs", 0)
+            },
+            "metrics": [],
+            "stats": training_stats
+        },
+        "checksum": {
+            "algorithm": "sha256",
+            "value": checksum_val
+        },
+        "created_at": now_iso,
+        "updated_at": now_iso,
+        "app": {
+            "name": "aplikasi-mini-lab-ai",
+            "version": "2.0.0"
         }
-      },
-      "training": {
-        "last_loss": float(final_loss),
-        "best_loss": float(final_loss),
-        "step": MAX_STEPS,
-        "batch_size": BATCH_SIZE
-      },
-      "created_at": datetime.now(timezone.utc).isoformat(),
-      "updated_at": datetime.now(timezone.utc).isoformat()
     }
+    return manifest
 
-    manifest_path = os.path.join(OUTPUT_DIR, "manifest.json")
-    with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2)
-        
-    print(f"Model final dan manifest berhasil disimpan di folder '{OUTPUT_DIR}'.")
 
-def main():
-    print("Memulai proses pre-training...")
-    extract_dataset()
+# ============================================================================
+# TRAINING LOOP
+# ============================================================================
+
+def train(args):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
     
-    contents = load_jsonl_data()
-    total_docs = len(contents)
-    print(f"Total dokumen dimuat: {total_docs}")
+    # Build simple vocab from special tokens + placeholder
+    # In production, build from corpus. Here we create a fixed-size vocab.
+    vocab = {tok: i for i, tok in enumerate(SPECIAL_TOKENS)}
+    # Fill remaining vocab slots with token placeholders
+    for i in range(len(SPECIAL_TOKENS), args.vocab_size):
+        vocab[f"<tok_{i}>"] = i
+    id_to_token = [""] * args.vocab_size
+    for tok, idx in vocab.items():
+        id_to_token[idx] = tok
     
-    tokens = simple_tokenize(contents, VOCAB_SIZE)
-    total_tokens = len(tokens)
-    print(f"Total token dari semua teks: {total_tokens}")
+    # Load dataset
+    dataset = JsonlTextDataset(args.data_dir, vocab, args.context_window)
+    dataloader = DataLoader(
+        dataset, 
+        batch_size=args.batch_size, 
+        shuffle=True, 
+        drop_last=True,
+        num_workers=2
+    )
     
-    weights = initialize_weights()
+    # Initialize model
+    model = TinyLMContextMLP(
+        vocab_size=args.vocab_size,
+        cw=args.context_window,
+        d=args.dim_d,
+        h=args.dim_h
+    ).to(device)
     
-    # Simulasi Loop Pre-training dengan perhitungan loss dari semua token
-    step = 0
-    current_loss = 10.0
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    criterion = nn.CrossEntropyLoss(ignore_index=0)  # ignore <pad>
     
-    while step < MAX_STEPS:
-        step += 1
-        # Simulasi penurunan loss secara bertahap
-        current_loss = max(1.2, current_loss * 0.9995 + np.random.uniform(-0.01, 0.01))
-        
-        # Simpan checkpoint setiap 10 batch/step kelipatan 10
-        if step % CHECKPOINT_INTERVAL == 0:
-            save_checkpoint(step, weights, current_loss)
+    # Checkpoint dirs
+    os.makedirs("checkpoints/final", exist_ok=True)
+    
+    global_step = 0
+    running_loss = 0.0
+    best_loss = float("inf")
+    start_time = datetime.now(timezone.utc)
+    
+    print(f"Starting training: max_steps={args.max_steps}, batch={args.batch_size}, cw={args.context_window}")
+    
+    model.train()
+    progress = tqdm(total=args.max_steps, desc="Training")
+    
+    while global_step < args.max_steps:
+        for batch_x, batch_y in dataloader:
+            if global_step >= args.max_steps:
+                break
+                
+            batch_x = batch_x.to(device)
+            batch_y = batch_y.to(device)
             
-        if step >= MAX_STEPS:
-            break
+            # Forward: logits are (batch, vocab_size), targets need flattening
+            # Since ContextMLP produces ONE prediction per sequence (not per token),
+            # we predict the LAST next-token in the context window
+            logits = model(batch_x)  # (batch, vocab_size)
+            target = batch_y[:, -1]   # (batch,) - last position target
+            
+            loss = criterion(logits, target)
+            
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            
+            running_loss += loss.item()
+            global_step += 1
+            progress.update(1)
+            progress.set_postfix(loss=f"{loss.item():.4f}")
+            
+            # Save checkpoint every N batches
+            if global_step % args.checkpoint_every == 0:
+                avg_loss = running_loss / args.checkpoint_every
+                ckpt_dir = f"checkpoints/step_{global_step}"
+                os.makedirs(ckpt_dir, exist_ok=True)
+                
+                tensors_meta = save_model_bin(model, os.path.join(ckpt_dir, f"{MODEL_NAME}.bin"))
+                
+                elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
+                stats = {
+                    "steps": global_step,
+                    "loss": round(avg_loss, 6),
+                    "ema": round(avg_loss, 6),
+                    "dataset": "Dataset gabungan (JSONL)",
+                    "tokens": len(dataset.tokens),
+                    "docs": 0,  # Will be updated below
+                    "elapsed": round(elapsed, 2),
+                    "lr": optimizer.param_groups[0]["lr"],
+                    "batch_size": args.batch_size,
+                    "epoch": 0
+                }
+                
+                manifest = build_manifest(model, tensors_meta, stats, id_to_token,
+                                          os.path.join(ckpt_dir, f"{MODEL_NAME}.bin"))
+                with open(os.path.join(ckpt_dir, "manifest.json"), "w") as f:
+                    json.dump(manifest, f, indent=1)
+                
+                if avg_loss < best_loss:
+                    best_loss = avg_loss
+                    # Copy best to final
+                    import shutil
+                    shutil.copytree(ckpt_dir, "checkpoints/final", dirs_exist_ok=True)
+                
+                running_loss = 0.0
+                print(f"\n[Checkpoint] Step {global_step} | Loss: {avg_loss:.4f} | Saved to {ckpt_dir}")
+    
+    progress.close()
+    
+    # Ensure final checkpoint exists
+    final_bin = "checkpoints/final/model.bin"
+    final_manifest = "checkpoints/final/manifest.json"
+    
+    if not os.path.exists(final_bin):
+        tensors_meta = save_model_bin(model, final_bin)
+        elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
+        stats = {
+            "steps": global_step,
+            "loss": round(running_loss / max(global_step % args.checkpoint_every, 1), 6),
+            "ema": round(best_loss, 6),
+            "dataset": "Dataset gabungan (JSONL)",
+            "tokens": len(dataset.tokens),
+            "docs": 0,
+            "elapsed": round(elapsed, 2),
+            "lr": optimizer.param_groups[0]["lr"],
+            "batch_size": args.batch_size,
+            "epoch": 0
+        }
+        manifest = build_manifest(model, tensors_meta, stats, id_to_token, final_bin)
+        with open(final_manifest, "w") as f:
+            json.dump(manifest, f, indent=1)
+    
+    print(f"\n✅ Training complete. Final model saved to checkpoints/final/")
+    print(f"   Binary: {final_bin}")
+    print(f"   Manifest: {final_manifest}")
 
-    print("Pre-training selesai!")
-    save_final_model_and_manifest(weights, current_loss, total_tokens, total_docs)
+
+# ============================================================================
+# CLI
+# ============================================================================
 
 if __name__ == "__main__":
-    main()
- 
+    parser = argparse.ArgumentParser(description="TinyLM-ContextMLP Pretraining")
+    parser.add_argument("--data_dir", type=str, required=True)
+    parser.add_argument("--context_window", type=int, default=5000)
+    parser.add_argument("--batch_size", type=int, default=100)
+    parser.add_argument("--max_steps", type=int, default=10000)
+    parser.add_argument("--vocab_size", type=int, default=5000)
+    parser.add_argument("--dim_h", type=int, default=125)
+    parser.add_argument("--dim_d", type=int, default=156)
+    parser.add_argument("--max_output_tokens", type=int, default=2084)
+    parser.add_argument("--checkpoint_every", type=int, default=10)
+    
+    args = parser.parse_args()
+    train(args)
