@@ -6,15 +6,43 @@ on:
       context_window:
         description: 'Context Window Size'
         required: true
-        default: '16'
+        default: '256'
       batch_size:
-        description: 'Batch Size'
+        description: 'Micro-batch Size'
         required: true
-        default: '100'
+        default: '16'
+      grad_accum:
+        description: 'Gradient Accumulation Steps'
+        required: true
+        default: '1'
       max_steps:
-        description: 'Max Training Steps'
+        description: 'Max Optimizer Steps'
         required: true
         default: '3000'
+      vocab_size:
+        description: 'Vocabulary Size'
+        required: true
+        default: '10000'
+      n_layer:
+        description: 'Number of Transformer Layers'
+        required: true
+        default: '4'
+      n_head:
+        description: 'Number of Attention Heads'
+        required: true
+        default: '4'
+      dim_d:
+        description: 'Embedding Dimension (must be divisible by n_head)'
+        required: true
+        default: '256'
+      dim_h:
+        description: 'Feedforward Hidden Dimension'
+        required: true
+        default: '1024'
+      lr:
+        description: 'Peak Learning Rate'
+        required: true
+        default: '3e-4'
 
 concurrency:
   group: pretrain-${{ github.ref }}
@@ -51,23 +79,41 @@ jobs:
 
       - name: Run Pretraining
         env:
-          CONTEXT_WINDOW: ${{ github.event.inputs.context_window }}
-          BATCH_SIZE: ${{ github.event.inputs.batch_size }}
-          MAX_STEPS: ${{ github.event.inputs.max_steps }}
-          VOCAB_SIZE: 5000
-          EMBEDDING_DIM_H: 125
-          EMBEDDING_DIM_D: 125
+          CONTEXT_WINDOW:   ${{ github.event.inputs.context_window }}
+          BATCH_SIZE:       ${{ github.event.inputs.batch_size }}
+          GRAD_ACCUM:       ${{ github.event.inputs.grad_accum }}
+          MAX_STEPS:        ${{ github.event.inputs.max_steps }}
+          VOCAB_SIZE:       ${{ github.event.inputs.vocab_size }}
+          N_LAYER:          ${{ github.event.inputs.n_layer }}
+          N_HEAD:           ${{ github.event.inputs.n_head }}
+          DIM_D:            ${{ github.event.inputs.dim_d }}
+          DIM_H:            ${{ github.event.inputs.dim_h }}
+          LR:               ${{ github.event.inputs.lr }}
           MAX_OUTPUT_TOKENS: 2084
-          CHECKPOINT_INTERVAL: 10
+          CHECKPOINT_INTERVAL: 100
+          WARMUP_STEPS: 500
+          WEIGHT_DECAY: 0.1
+          GRAD_CLIP: 1.0
+          DROPOUT: 0.1
+          NUM_WORKERS: 2
         run: |
           python train.py \
             --data_dir dataset_extracted \
             --context_window $CONTEXT_WINDOW \
             --batch_size $BATCH_SIZE \
+            --grad_accum $GRAD_ACCUM \
             --max_steps $MAX_STEPS \
             --vocab_size $VOCAB_SIZE \
-            --dim_h $EMBEDDING_DIM_H \
-            --dim_d $EMBEDDING_DIM_D \
+            --n_layer $N_LAYER \
+            --n_head $N_HEAD \
+            --dim_d $DIM_D \
+            --dim_h $DIM_H \
+            --lr $LR \
+            --warmup_steps $WARMUP_STEPS \
+            --weight_decay $WEIGHT_DECAY \
+            --grad_clip $GRAD_CLIP \
+            --dropout $DROPOUT \
+            --num_workers $NUM_WORKERS \
             --max_output_tokens $MAX_OUTPUT_TOKENS \
             --checkpoint_every $CHECKPOINT_INTERVAL
 
